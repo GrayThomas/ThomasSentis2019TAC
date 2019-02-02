@@ -1,3 +1,6 @@
+"""
+Just some utilities to work around the most recent updates to cvxpy.
+"""
 import cvxpy as cvx
 
 def Semidef(nx):

@@ -1,11 +1,18 @@
+"""
+Demonstration of robust QIP modelling with OBFs.
+
+Gray Cortright Thomas
+
+This is the main file of the demo. In the main function it regenerates the simulation result from the paper ThomasSentis2019TAC.
+
+"""
 
 import numpy as np
-from gQIP import *
-from pickle_memoize import memoize
+from gQIP import GeneralizedQuadricInclusionProgram, GQIPLS, expand_to_fit
+from collections import namedtuple
 import time
 import matplotlib.pyplot as plt
-from tdtf_mpl_backend import BodePlot
-from ori_utils import ori4_close
+from uncertain_bode import BodePlot
 import control_LMIs as clmi
 import control as ctrl
 from matplotlib.font_manager import FontProperties
@@ -17,6 +24,8 @@ mpl.rcParams['hatch.linewidth'] = 0.25
 
 high_hasharg="a000"
 
+# Setup sizing information. QIP can be applied to systems with more inputs and
+# outputs than this simple example demonstrates.
 EXAMPLE_SYSTEM_POLES = 4
 OBF_POLES = 6
 OBF_OUTPUTS = 6
@@ -77,13 +86,7 @@ class ExampleSystem(object):
 
 
     def ori4(self, omega, input_selector, output_selector, eps=1e-2):
-        # determanistic system version
-        """ produces the ori4 data points needed to plot TFs.
-        -- system_00 --- input to output
-        -- system_01 --- uncertainty to output
-        -- system_10 --- input to uncertainty
-        -- system_11 --- zero (uncertainty to uncertianty)
-        """
+        # returns a four tuple representing a transfer function at one frequency
 
         system_00 = output_selector.dot(
             np.exp(self.time_delay * complex(0, -omega))*(self.D+self.C.dot(
@@ -91,14 +94,11 @@ class ExampleSystem(object):
                     complex(0, omega) * np.eye(self.nx) - self.A,
                     self.B))).dot(input_selector))
 
-        system_01 = output_selector.dot(self.C)
-
         return (omega, system_00.real, system_00.imag, 0.0)
 
 
     def cg_average_experiment(self, omega, u_phasor, N=10):
-        # self.reDelta()
-        # self.reDelta2(omega, u_phasor)
+        # simulates N experiments and calculates condition group statistics.
         y_phasors = [
             self.frequency_domain_experiment(
                 omega, u_phasor) for i in range(N)]
@@ -110,13 +110,11 @@ class ExampleSystem(object):
         return avg_y_phasor, (cov_y_phasor_real, cov_y_phasor_imag), y_phasors
 
     def multi_cg_experiment(self, omegas, u_phasor, N=10):
+        # multi condition group experiment
         data = []
         for omega in omegas:
-            # new_N = min(max(int(1+N*2*np.pi*omega),4),100)
-            new_N=N
-            # print (omega, new_N)
             avg_y_phasor, cov_y_phasor, y_phasors = self.cg_average_experiment(
-                omega, u_phasor, N=new_N)
+                omega, u_phasor, N=N)
             data.append(
                 MCGData(
                     omega,
@@ -128,23 +126,31 @@ class ExampleSystem(object):
 
 class UncertainBasisFunctionSystem(clmi.StateSpace):
     def __init__(self, new_ibs_exp=None):
-
+        # These linear systems approximate the poles of the system. Some are
+        # just high frequency low pass filters. Some are intentionally similar
+        # to the resonant poles of a series elastic actuator.
         lp_0 = clmi.StateSpace(np.array([[-pow(10,1.5)]]), np.array([[1]]), np.array([[1]]), np.array([[0]]))
         lp_1 = clmi.StateSpace(np.array([[-pow(10,1.0)]]), np.array([[1]]), np.array([[1]]), np.array([[0]]))
+        # Adjust these pole locations and dampings to see the influence of basis function quality on the QIP result.
         sys1 = clmi.StateSpace(np.array([[0, 1], [-pow(10,.7*2), -.2*pow(10,.7)]]), np.array([[0],[1]]), np.array([[1, 0]]), np.array([[0]]))
         sys2 = clmi.StateSpace(np.array([[0, 1], [ -pow(10,-.32*2), -.8*pow(10,-.32)]]), np.array([[0],[1]]), np.array([[1, 0]]), np.array([[0]]))
 
+        # Assemble the system from component blocks
         ((in0,), (out0,)) = lp_0.tags
         lp_0 = lp_0.inline(out0, lp_1)
         lp_0 = lp_0.inline(lp_1.tags[1][0], sys1)
         lp_0 = lp_0.inline(lp_1.tags[1][0], sys2)
         lp_0 = lp_0.cleaned_inputs([in0])
+
+        # The gramian is used to ortho-normalize the system
         Wc = ctrl.gram(lp_0,'c')
         sig, U = (np.linalg.eigh(Wc))
+        # this assertion explains the result of the eigh function
         assert np.linalg.norm(U.dot(np.diagflat(sig).dot(U.T))-Wc)<1e-7
         C = np.diagflat([1.0/np.sqrt(si) for si in sig]).dot(U.T)
         super().__init__(lp_0.A, lp_0.B, C, np.zeros((C.shape[0],1)))
 
+        # The grammian is used to confirm that the basis is orthonormal in H2.
         Wc = ctrl.gram(self, 'c')
         assert np.linalg.norm(U.T.dot(Wc).dot(U)-np.diagflat(sig))<1e-7
         assert np.linalg.norm(Wc-ctrl.gram(lp_0, 'c'))<1e-7
@@ -157,10 +163,14 @@ class UncertainBasisFunctionSystem(clmi.StateSpace):
         self.qip_c = qip_c
 
     def obf(self, omega):
+        # orthonormal basis function
         return self.D+self.C.dot(np.linalg.solve(complex(0, omega) * np.eye(self.states) - self.A, self.B))
 
 
     def ori4(self, omega, input_selector, output_selector, eps=1e-2):
+        # ori4 is a data type which lists 4-tuples of omega (angular
+        # frequency), real (component of transfer function), imaginary, and
+        # uncertainty
 
         x = self.obf(omega).dot(input_selector)
 
@@ -205,93 +215,6 @@ class UncertainBasisFunctionSystem(clmi.StateSpace):
 
 MCGData = namedtuple("MCGData", ['omega','u_phasor','avg_y_phasor','cov_y_phasor', 'raw_yphasors'])
 
-
-def meta_inclusion(data,L):
-    L0=L
-    np.random.shuffle(data)
-    
-    quadric_inclusion_program=QIPmonitor(uplim=1e5, alpha=3.0)
-    model, width = quadric_inclusion_program(data[:L])
-    while L<len(data):
-        L*=4
-        model, width = quadric_inclusion_program(cull_data(data[:L], model, 0.0))
-        print(model)
-    model, width = quadric_inclusion_program(cull_data(data, model, 1e-4))
-    return model, width
-
-def determined_meta_inclusion(data, L=5000):
-    while True:
-        try:
-            return meta_inclusion_gQIP(data, L)
-        except cvx.error.SolverError as e:
-            print("SOLVER ERROR, trying again")
-        except UpperBoundException as e:
-            print("UPPER BOUND EXCEPTION, trying again")
-        except AssertionError as e:
-            print("ASSERTION ERROR, trying again")
-
-
-def meta_inclusion_gQIP(data,L=5000):
-    # L is the maximum length we can handle
-    t0 = time.time()
-    np.random.shuffle(data)
-    print("shuffled in %.4f seconds"%(time.time()-t0))
-    
-    gqip = TransformedGQIP(6, 2, 6, uplim=1e5, alpha=4, 
-        extraction_eigenvalue_zero_tolerance= 1e-6, 
-        extraction_assertion_zero_tolerance = 1e-5)
-
-    short_data = data[:min(len(data),L)]
-
-    t0 = time.time()
-    gqip.setup_normalization_with_A(short_data)
-    # print gqip.A0
-    # exit()
-    print("setup normalization in %.4f seconds"%(time.time()-t0))
-    t0 = time.time()
-    gqip.set_data(short_data)
-    print("set data in %.4f seconds"%(time.time()-t0))
-    t0 = time.time()
-    (A,B,C), value = gqip.default_solve(universal_tol=1e-7)#meta_solve(gqip)
-    print("solved in %.4f seconds"%(time.time()-t0))
-    # print A,B,C
-    latex_print(A)
-    latex_print(B)
-    latex_print(C)
-    # active_data = cull_gQIP_data(data[:L], (A,B,C), -1e-4, alpha=gqip.alpha)
-    # It seems like the transformation is not being applied properly. 
-    # exit()
-    vallist0 = 1e10
-    while True:
-        t0 = time.time()
-        vallist = list(reversed(sorted(stat_gQIP_data(data, (A,B,C), gqip.alpha))))
-        print("vallist in %.4f seconds"%(time.time()-t0))
-        print(vallist[:10])
-        if vallist[0]<1e-3 and vallist[0]==vallist0:
-            break
-        vallist0 = vallist[0]
-        threshold = vallist[int(min(L,len(data))-1)]-1e-6
-        short_data_old = short_data
-        t0 = time.time()
-        short_data = cull_gQIP_data(data, (A,B,C), threshold,  alpha=gqip.alpha)
-        print("culled in %.4f seconds"%(time.time()-t0))
-        t0 = time.time()
-        gqip.setup_normalization_with_A(short_data)
-        print("setup normalization in %.4f seconds"%(time.time()-t0))
-        t0 = time.time()
-        gqip.set_data(short_data)
-        print("set data in %.4f seconds"%(time.time()-t0))
-        t0 = time.time()
-        (A,B,C), value = gqip.default_solve(universal_tol=1e-7)#meta_solve(gqip)
-        print("solved in %.4f seconds"%(time.time()-t0))
-        # print ((A,B,C))
-        latex_print(A)
-        latex_print(B)
-        latex_print(C)
-    print("ratio", np.linalg.norm(B[1,:])/np.linalg.norm(B[0,:]))
-
-    return (A,B,C), value
-
 def latex_print(mat):
     print('\\\\ \n'.join([' & '.join(["%.3f"%a for a in row]) for row in np.array(mat) ]))
     
@@ -310,10 +233,6 @@ def phasor_data_2_ori4(phasor_data, n_sigma=5):
     return n_sigma_ori4s, raw_scatter_ori4s
 
 def ori4_system_response(system, omegas):
-    # mag, phase, omega = system.freqresp(omegas)
-    # print("mag", mag)
-    # print("phase", phase)
-    # print("omega", omega)
     rows = []
     for out in range(system.outputs):
         row = []
@@ -343,7 +262,6 @@ def main():
 
     ## GRAY true system plot
     example_ori4s_1 = [example_system.ori4(omega, np.ones((1,)), np.ones((1,)), eps=3e-7) for omega in fine_omegas]
-  
 
     print("generating data")
     t0 = time.time()
@@ -361,7 +279,6 @@ def main():
     plt.add_ori4_line(example_ori4s_1, mirror=False, color=(0.3, 0.3, 0.3))
     plt.add_ori4_line(example_ori4s_2, mirror=False, color=(0.3, 0.3, 0.3))
     plt.add_ori4_line(example_ori4s_3, mirror=False, color=(0.3, 0.3, 0.3))
-    # plt.add_ori4_scatter(raw_scatter_ori4, sigma=0.005, color=(0.0, 0.0, 0.0))
     
     qip_data = ubfs_system.get_gQIP_extractor()(phasor_data)
     ols_data = ubfs_system.get_OLS_raw_extractor()(phasor_data)
@@ -389,50 +306,39 @@ def main():
     ## Solve OLS
     gls = GQIPLS(ubfs_system.states, SYSTEM_OUTPUTS, ubfs_system.states, uplim=1e4, alpha=qip_alpha)
     gls.set_data(qip_data)
-    # gls.set_data_raw(ols_data)
     args = dict()
     (ls_a, ls_b, ls_c), width = gls.solve(**args)
-    # (ls_a, ls_b, ls_c), width = gls.solve_raw(**args)
 
     ## Expand models
     ratio_ls = 1.0
     for i in range(10):
-        (ls_a, ls_b, ls_c)    , max_ratio_ls= expand_to_fit((ls_a, ls_b, ls_c), qip_data, qip_alpha)
+        (ls_a, ls_b, ls_c), max_ratio_ls = expand_to_fit((ls_a, ls_b, ls_c), qip_data, qip_alpha)
         ratio_ls*=max_ratio_ls
     print("scaled B least squares by a total of", ratio_ls)
     ratio_qip = 1.0
     for i in range(10):
-        (qip_a, qip_b, qip_c) , max_ratio_qip= expand_to_fit((qip_a, qip_b, qip_c), qip_data, qip_alpha)
+        (qip_a, qip_b, qip_c), max_ratio_qip = expand_to_fit((qip_a, qip_b, qip_c), qip_data, qip_alpha)
         ratio_qip*=max_ratio_qip
     print("scaled B qip by a total of", ratio_qip)
 
     ## Plot QIP Model
     ubfs_system.apply_learned_model_result(qip_a, qip_b, qip_c)
     learned_ori4 = [ubfs_system.ori4(omega, np.ones((1,1)), np.ones((1,1)), eps=1e-7) for omega in fine_omegas]
-    plt.add_ori4_surf(ori4_close(learned_ori4), zorder=-2, color="k", alpha=.1)
-    plt.add_ori4_surf(ori4_close(learned_ori4), zorder=4, lw=.25, facecolor="none", edgecolor="red", alpha=1.0, hatch='+++')
-    plt.add_ori4_line(ori4_close(learned_ori4), color="red", zorder=2, linestyle="-.", lw=2.0)
+    plt.add_ori4_surf((learned_ori4), zorder=4, lw=.25, facecolor="none", edgecolor="red", alpha=1.0, hatch='+++')
+    plt.add_ori4_line((learned_ori4), color="red", zorder=2, linestyle="-.", lw=2.0)
 
     ## Plot LS Model
     ubfs_ls_sys.apply_learned_model_result(ls_a, ls_b, ls_c)
     learned_ori4 = [ubfs_ls_sys.ori4(omega, np.ones((1,1)), np.ones((1,1)), eps=1e-7) for omega in fine_omegas]
     args = dict(facecolor="gray", alpha=.5, edgecolor="none")
-    obj1 = plt.add_ori4_surf(ori4_close(learned_ori4), zorder=-2, color="k", alpha=.1)
-    obj2 = plt.add_ori4_surf(ori4_close(learned_ori4), zorder=4, lw=.25, facecolor="none", edgecolor="blue", alpha=1.0, hatch='///')
-    plt.add_ori4_line(ori4_close(learned_ori4), color="blue", zorder=2, linestyle="-.", lw=2.0)
-    # plt.add_ori4_surf(ori4_close(learned_ori4), zorder=-2, color=(0.0, 0.0, 0.8), alpha=.15)
-    # plt.add_ori4_surf(ori4_close(learned_ori4), zorder=4, lw=.25, facecolor="none", edgecolor='k', alpha=.95, hatch='////')
-    # plt.add_ori4_line(ori4_close(learned_ori4), color=(0.0, 0.0, 1.0), zorder=2, linestyle=":", lw=2.5)
+    obj2 = plt.add_ori4_surf((learned_ori4), zorder=4, lw=.25, facecolor="none", edgecolor="blue", alpha=1.0, hatch='///')
+    plt.add_ori4_line((learned_ori4), color="blue", zorder=2, linestyle="-.", lw=2.0)
 
-    # plt.legend([(blue_dot, green_line)], ["DesiredKey"], loc='upper center')
-    ## Finish plot
-    # plt.setup_tics()
     fontP = FontProperties()
     fontP.set_size('small')
     leg = plt.axs[0].legend([
         "measurements",
         "true system, cfg. 1","true system, cfg. 2","true system, cfg. 3", 
-        # "basis 1","basis 2","basis 3",'basis 4','basis 5','basis 6',
         'qip nominal', "ls nominal",'qip fit', "ls fit"], 
         bbox_to_anchor=(1.0,1.00), prop=fontP)
     pyplt.tight_layout()

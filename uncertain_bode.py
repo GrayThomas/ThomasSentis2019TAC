@@ -1,14 +1,16 @@
+"""
+A Bode plot class which handles uncertainty using area plots.
+"""
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-# from general_plotting_prettyness import *
 from collections import namedtuple
 from math import atan2, asin, log10, log, pi, sqrt
 import cmath
 import math
 import mpl_toolkits.mplot3d.axes3d as p3
 
-png_folder = r"/home/gray/wk/metaid/sea_sysid_and_synthesis/rawplots/"
-pdf_folder = r"/home/gray/wk/metaid/sea_sysid_and_synthesis/rawplots/"
+png_folder = r"../results/"
+pdf_folder = r"../results/"
 
 BodeExp = namedtuple("BodeExp",["omega","mag","phase"])
 ORI = namedtuple("ORI",["omega","real","imag"])
@@ -23,324 +25,8 @@ nsig = 2.0
 def gen_amps(data):
     return list(set([data[k]["experiment.u[0].amp"][0] for k in list(data.keys()) if len(data[k]["experiment.u[0].amp"])>0]))
 
-from mpl_toolkits.mplot3d import proj3d
 import numpy as np
- 
-def orthogonal_proj(zfront, zback):
-    a = (zfront+zback)/(zfront-zback)
-    b = -2*(zfront*zback)/(zfront-zback)
-    # -0.0001 added for numerical stability as suggested in:
-    # http://stackoverflow.com/questions/23840756
-    return np.array([[1,0,0,0],
-                        [0,1,0,0],
-                        [0,0,a,b],
-                        [0,0,-0.0001,zback]])
- 
-# Later in your plotting code ...
-proj3d.persp_transformation = orthogonal_proj
 
-def getRandomBoarderlineContraction(n):
-    # this samples over all diagonalizable matrices with unit length singular
-    # values
-    A = np.array([[np.random.normal() + complex(0, 1.) * np.random.normal()
-                   for j in range(0, n)] for i in range(0, n)])
-    return cast_to_boarderline_contraction(A)
-
-
-def cast_to_boarderline_contraction(A):
-    u, s, v = np.linalg.svd(A)
-    sprime = [1.0 if abs(si)<1e-6 else (si / abs(si)) for si in s]
-    assert np.linalg.norm(A - u.dot(np.diagflat(s)).dot(v)) < 1e-12
-    unity_A2 = u.dot(np.diagflat(sprime)).dot(v)
-    return unity_A2
-
-class Log3DNyquistPlot(object):
-    ''' A nice-looking log-amplitude nyquist plot class, similar to BodePlot'''
-    def __init__(self,min_amp):
-        self.fig = plt.figure()
-        self.ax = p3.Axes3D(self.fig)
-        self.ax.xaxis.set_ticks([])
-        self.ax.yaxis.set_ticks([])
-
-        # exit()
-        self.min_amp = min_amp
-        self.max_amp = 0.0
-        self.min_omega = float('inf')
-        self.max_omega = 0.0
-        self.ax.set_xlabel(r"Real Part")
-        self.ax.set_ylabel(r"Imaginary Part")
-        self.ax.set_zlabel(r"Log of Frequency")
-        self.ax.yaxis.set_visible(0)
-        self.plot_name="3D Log-Nyquist Plot"
-        # plt.locator_params(nbins=10)
-
-    def title(self,title):
-        self.ax.set_title(title)
-
-
-    def save(self, name):
-        self.fig.savefig(pdf_folder+name+".pdf", 
-            facecolor='w', edgecolor='w',
-            pad_inches=0.01)
-        self.fig.savefig(png_folder+name+".png", 
-            facecolor='w', edgecolor='w', dpi=400,
-            pad_inches=0.01)
-
-    def add_data(self, data, yind,  alpha=1.0):
-        experiment_keys=list(data.keys())
-        amps = gen_amps(data)
-        amp_indexed_exps={}
-        for e in experiment_keys:
-            if len(data[e]['experiment.u[0].amp'])==0:
-                continue
-            amp = data[e]['experiment.u[0].amp'][0]
-            if amp not in amp_indexed_exps:
-                amp_indexed_exps[amp]=[] # zip(omega, real, imag) format
-            omegas = data[e]['experiment.omega']
-            reals = data[e]['y[%d].real'%yind]/amp
-            imags = data[e]['y[%d].imag'%yind]/amp
-
-            amp_indexed_exps[amp].extend(list(zip(omegas, reals, imags)))
-
-        for amp in sorted(amp_indexed_exps.keys()):
-            col=color_lambda(amp)
-            self.add_ori_scatter(amp_indexed_exps[amp], color_lambda(amp), alpha=alpha)
-        self.title("y[%d] %s, %d dB"%(yind, self.plot_name, dB(self.min_amp)))
-        self.setup_tics()
-        # self.fig.tight_layout()
-
-    def dBscale(self, r,i):
-        dat = sqrt(r**2+i**2)
-        dB_value = dB(dat)-dB(self.min_amp) if dB(dat)-dB(self.min_amp)>0 else 0
-        scale = dB_value/dat if dat>0 else 0.0
-        return scale
-
-    def setup_tics(self):
-        # self.fig.tight_layout()
-        M1 = (dB(self.max_amp)-dB(self.min_amp))*np.sqrt(2.0)
-        M2 = 0.0
-        O1 = np.log10(self.max_omega)
-        O2 = np.log10(self.min_omega)
-        Xb = (M1)*np.mgrid[-1:2:2,-1:2:2,-1:2:2][0].flatten()
-        Yb = (M1)*np.mgrid[-1:2:2,-1:2:2,-1:2:2][1].flatten()
-        Zb = 0.5*(O1-O2)*np.mgrid[-1:2:2,-1:2:2,-1:2:2][2].flatten() + 0.5*(O1+O2)
-        # Comment or uncomment following both lines to test the fake bounding box:
-        for xb, yb, zb in zip(Xb, Yb, Zb):
-            # print xb, yb, zb
-            self.ax.plot([xb], [yb], [zb], 'w')
-        self.ax.set_aspect('equal')
-        self.setup_negative_one_point()
-        self.add_ori_line([(self.min_omega, -1.0, 0.0)],marker='o', ms=1, color='#AAAAAA')
-
-
-        num_ticks = int((dB(1.0)-dB(self.min_amp))/20)
-        angles = 12
-        # exit()
-        amps=[pow(10,-n) for n in range(num_ticks)]
-        for a in amps:
-            self.draw_circle((0,0),a,lw=.5, color="#AAAAAA")
-
-        self.draw_circle((0,0),1,lw=.5, color="#666666")
-
-        radius = -dB(self.min_amp)
-        # print(radius)
-        degree_sign= '\N{DEGREE SIGN}'
-        # exit()
-        for q in np.linspace(0,2*np.pi,angles+1)[:-1]:
-            scale=1.2
-            self.add_ori_line([(self.min_omega, 0.0, 0.0),(self.min_omega, np.cos(q), np.sin(q))], mirror=False, lw=0.5, color='#AAAAAA')
-            self.add_ori_line([(self.min_omega, np.cos(q), np.sin(q)),(self.min_omega, scale*np.cos(q), scale*np.sin(q))], mirror=False, lw=1.0, color='#111111')
-            self.ax.text(scale*radius*np.cos(q),scale*radius*np.sin(q), np.log10(self.min_omega), ("%d"+degree_sign)%int(180.0*q /np.pi+0.5))
-        scale=10
-        q = np.pi/4.
-        self.add_ori_line([(self.min_omega, 0.0, 0.0),(self.min_omega, np.cos(q), np.sin(q))], mirror=False, lw=0.5, color='#AAAAAA')
-        self.add_ori_line([(self.min_omega,np.cos(q), np.sin(q)),(self.min_omega, scale*np.cos(q), scale*np.sin(q))], mirror=False, lw=1.0, color='#AAAAAA')
-        
-        sweep_range = np.linspace(-0.05+q,0.05+q, 100)
-        for a in amps+[10]:
-            self.add_ori_line([(self.min_omega, a*np.cos(s), a*np.sin(s)) for s in sweep_range],mirror=False, lw=1.0, color='#111111')
-            self.ax.text((dB(a)+radius)*np.cos(q),(dB(a)+radius)*np.sin(q), np.log10(self.min_omega), "%d dB"%(dB(a)) )
-
-        self.add_ori_line([(self.min_omega, 0.0, 0.0), (self.max_omega,0,0)],mirror=False,lw=.5, color="#666666")
-
-    def plot_SISO(self, tf, omega_lims = None, num_omegas=1000, num_markers=10, **kwargs):
-        if omega_lims==None:
-            omega_lims = [self.min_omega, self.max_omega]
-        omegas = np.logspace(log10(omega_lims[0]), log10(omega_lims[1]), num_omegas)
-        Z = [tf(w) for w in omegas]
-        ori = [(w, z.real, z.imag) for w,z in zip(omegas, Z)]
-        ori_2 = [(self.min_omega, r, i) for o,r,i in ori]
-        self.add_ori_line(ori,**kwargs)
-        if "alpha" in kwargs:
-            kwargs["alpha"]*=0.5
-        self.add_ori_line(ori_2,**kwargs)
-
-    def plot_MIMO(self, tf, colors, omega_lims = None, num_omegas=1000, **kwargs):
-        if omega_lims==None:
-            omega_lims = [self.min_omega, self.max_omega]
-        omegas = np.logspace(log10(omega_lims[0]), log10(omega_lims[1]), num_omegas)
-        Z = [tf(w) for w in omegas]
-        for i in range(tf(1).shape[0]):
-            for j in range(tf(1).shape[1]):
-                ori = [(w, z[i,j].real, z[i,j].imag) for w,z in zip(omegas, Z)]
-                self.add_ori_line(ori, color=colors[i][j], **kwargs)
-
-    def plot_PEJ_MIMO(self, P_tf,E_tf, J_tf, colors, omega_lims = None, num_omegas=100, num_thetas=12, **kwargs):
-        if omega_lims==None:
-            omega_lims = [self.min_omega, self.max_omega]
-        omegas = np.logspace(log10(omega_lims[0]), log10(omega_lims[1]), num_omegas)
-        thetas = np.linspace(0.0, np.pi*2, num_thetas+1)[:-1]
-        P = [P_tf(w) for w in omegas]
-        E = [E_tf(w) for w in omegas]
-        J = [J_tf(w) for w in omegas]
-        for i in range(P_tf(1).shape[0]):
-            for j in range(P_tf(1).shape[1]):
-                ori = [(w, z[i,j].real, z[i,j].imag) for w,z in zip(omegas, P)]
-                self.add_ori_line(ori, color=colors[i][j], **kwargs)
-                deltas =  [max(np.absolute(Eo[i,:]))*max(np.absolute(Jo[:,j])) for Eo, Jo in zip(E, J)]
-                for th in thetas:
-                    q = complex(np.cos(th), np.sin(th))
-                    ori = [(w, z[i,j].real+q.real*delta, z[i,j].imag+q.imag*delta) for w,z, delta in zip(omegas, P, deltas)]
-                    self.add_ori_line(ori, color=colors[i][j], **kwargs)
-
-    def plot_LFT_MIMO(self, G_tf, N, colors, omega_lims = None, num_omegas=100, num_thetas=12, **kwargs):
-        if omega_lims==None:
-            omega_lims = [self.min_omega, self.max_omega]
-        omegas = np.logspace(log10(omega_lims[0]), log10(omega_lims[1]), num_omegas)
-        for i in range(G_tf(1).shape[0]-N):
-            for j in range(G_tf(1).shape[1]-N):
-                ori = [(w, G_tf(w)[i,j].real, G_tf(w)[i,j].imag) for w in omegas]
-                self.add_ori_line(ori, color=colors[i][j], **kwargs)
-        for delta in [getRandomBoarderlineContraction(N) for i in range(20)]:
-            Gs = [G_tf(w) for w in omegas]
-            Ts = [G[:-N,:-N]+G[:-N,-N:].dot(delta).dot(np.linalg.solve(np.eye(N)-delta.dot(G[-N:,-N:]), G[-N:,:-N])) for G in Gs]
-            # print("hi")
-            for i in range(G_tf(1).shape[0]-N):
-                for j in range(G_tf(1).shape[1]-N):
-                    ori = [(w, z[i,j].real, z[i,j].imag) for w,z in zip(omegas, Ts)]
-                    self.add_ori_line(ori, color=colors[i][j], **kwargs)
-
-    def plot_SSu_MIMO(self, G, N, colors, omega_lims = None, num_omegas=100, num_thetas=12, **kwargs):
-        if omega_lims==None:
-            omega_lims = [self.min_omega, self.max_omega]
-        omegas = np.logspace(log10(omega_lims[0]), log10(omega_lims[1]), num_omegas)
-
-        ((A, B, Bq),(C, _, _,),(Cq, Dq, _)) = G
-
-        for i in range(G_tf(1).shape[0]-N):
-            for j in range(G_tf(1).shape[1]-N):
-                ori = [(w, G_tf(w)[i,j].real, G_tf(w)[i,j].imag) for w in omegas]
-                self.add_ori_line(ori, color=colors[i][j], **kwargs)
-        for delta in [getRandomBoarderlineContraction(N) for i in range(20)]:
-            Gs = [G_tf(w) for w in omegas]
-            Ts = [G[:-N,:-N]+G[:-N,-N:].dot(delta).dot(np.linalg.solve(np.eye(N)-delta.dot(G[-N:,-N:]), G[-N:,:-N])) for G in Gs]
-            # print("hi")
-            for i in range(G_tf(1).shape[0]-N):
-                for j in range(G_tf(1).shape[1]-N):
-                    ori = [(w, z[i,j].real, z[i,j].imag) for w,z in zip(omegas, Ts)]
-                    self.add_ori_line(ori, color=colors[i][j], **kwargs)
-
-    def plot_USF_MIMO(self, G, N, colors, omega_lims = None, num_omegas=100, num_thetas=12, **kwargs):
-        if omega_lims==None:
-            omega_lims = [self.min_omega, self.max_omega]
-        omegas = np.logspace(log10(omega_lims[0]), log10(omega_lims[1]), num_omegas)
-
-        ((A, B0, B1),(C0, _, D01,),(C1, D10, D11)) = G
-
-        sImA = lambda w: np.eye(A.shape[0])*complex(0,w)-A
-        G00 = lambda w: C0.dot(np.linalg.solve(sImA(w),B0))
-        G10 = lambda w: C1.dot(np.linalg.solve(sImA(w),B0))+D10
-        G11 = lambda w: C1.dot(np.linalg.solve(sImA(w),B1))+D11
-        G01 = lambda w: C0.dot(np.linalg.solve(sImA(w),B1))+D01
-
-
-
-        for i in range(G_tf(1).shape[0]-N):
-            for j in range(G_tf(1).shape[1]-N):
-                ori = [(w, G_tf(w)[i,j].real, G_tf(w)[i,j].imag) for w in omegas]
-                self.add_ori_line(ori, color=colors[i][j], **kwargs)
-        for delta in [getRandomBoarderlineContraction(N) for i in range(20)]:
-            Gs = [G_tf(w) for w in omegas]
-            Ts = [G[:-N,:-N]+G[:-N,-N:].dot(delta).dot(np.linalg.solve(np.eye(N)-delta.dot(G[-N:,-N:]), G[-N:,:-N])) for G in Gs]
-            # print("hi")
-            for i in range(G_tf(1).shape[0]-N):
-                for j in range(G_tf(1).shape[1]-N):
-                    ori = [(w, z[i,j].real, z[i,j].imag) for w,z in zip(omegas, Ts)]
-                    self.add_ori_line(ori, color=colors[i][j], **kwargs)
-                
-
-    def plot_robust_SISO(self, tf1, tf2, omega_lims = None, num_omegas=15,  **kwargs):
-        if omega_lims==None:
-            omega_lims = [self.min_omega, self.max_omega]
-        omegas = np.logspace(log10(omega_lims[0]), log10(omega_lims[1]), num_omegas)
-        Z1 = [tf1(w) for w in omegas]
-        Z2 = [tf2(w) for w in omegas]
-        ori1 = [(w, z.real, z.imag) for w,z in zip(omegas, Z1)]
-        ori2p = [(w, z.real, z.imag) for w,z in zip(omegas, Z2)]
-        ori1proj = [(self.min_omega, r, i) for o,r,i in ori1]
-        self.add_robust_ori_line(ori1, ori2p, **kwargs)
-        if "alpha" in kwargs:
-            kwargs["alpha"]*=0.5
-        self.add_robust_ori_line(ori1proj, ori2p, **kwargs)
-
-    def add_robust_ori_line(self, oriA, oriDelta, **kwargs):
-        # self.add_ori_line(oriA, **kwargs)
-        thetas=np.linspace(0,np.pi*2, 50)
-        for (o, r, i), (o1, rD, iD) in zip(oriA, oriDelta):
-            dat=[[],[],[]]
-            for theta in thetas:
-                dat[0].append(np.log10(o))
-                rp=r+np.cos(theta)*abs(complex(rD,iD))
-                ip=i+np.sin(theta)*abs(complex(rD,iD))
-                dat[1].append(rp*self.dBscale(rp, ip))
-                dat[2].append(ip*self.dBscale(rp, ip))
-            self.ax.plot(dat[1],dat[2],dat[0], **kwargs)
-
-    def add_robust_ori_circles(self, oriA, oriDelta, **kwargs):
-        return self.add_robust_ori_line(oriA, oriDelta, **kwargs)
-
-    def add_ori_line(self, ori_zip, mirror=True, shadow=False, **kwargs):
-        if len(ori_zip)==0:
-            return
-        re_scaled_reals = [ r*self.dBscale(r,i) for w,r,i in ori_zip]
-        re_scaled_imags = [ i*self.dBscale(r,i) for w,r,i in ori_zip]
-        negative__imags = [-i for i in re_scaled_imags]
-        log_omegas = [np.log10(w) for w,r,i in ori_zip]
-        self.max_amp = max(self.max_amp, max([sqrt(r**2+i**2) for w,r,i in ori_zip]))
-        self.min_omega = min(self.min_omega, min([w for w,r,i in ori_zip]))
-        self.max_omega = max(self.max_omega, max([w for w,r,i in ori_zip]))
-        min_omegas = [np.log10(self.min_omega) for w,r,i in ori_zip]
-            
-        self.ax.plot(re_scaled_reals, re_scaled_imags, log_omegas, **kwargs)
-        if mirror:
-            self.ax.plot(re_scaled_reals, negative__imags, log_omegas, **kwargs)
-        if shadow:
-            self.ax.plot(re_scaled_reals, re_scaled_imags, min_omegas, **kwargs)
-
-    def draw_circle(self, center, radius, **kwargs):
-        thetas=np.linspace(0,2*pi,1000)
-
-        re = center[0] + radius * np.cos(thetas)
-        im = center[1] + radius * np.sin(thetas)
-        omega=[self.min_omega for x in re]
-        self.add_ori_line(list(zip(omega,re,im)), mirror=False, **kwargs)
-
-    def setup_negative_one_point(self, lw=1.0, ls=':'):
-        amps=[0.01,0.25,0.5,1.0]
-        for a in amps:
-            self.draw_circle((-1,0),a,ls=ls,lw=lw, color='#888888')
-        # self.add_ori_line([(self.min_omega, -1,0)],ls=":",ms=4)
-    def show(self):
-        plt.show()
-
-def bode_axs():
-    # bode plot, shown with 2 sigma uncertainty.
-    fig, axs = plt.subplots(2, sharex=True)
-    plt.locator_params(nbins=10)
-    # axs[0].set_yscale('log')
-    # axs[1].set_xscale('log')
-    # axs[0].set_xscale('log')
-    return fig, axs
 default_color_lambda = lambda amp: custom_cm(amp/8.0+0.2)
 
 class BodePlot(object):
@@ -631,8 +317,13 @@ class BodePlot(object):
         pass
 
     def show(self):
-        # plt.tight_layout()
-        plt.show()
+        # fix for CodeOcean: save figures instead of showing them interactively.
+        self.fig.savefig("../results/output.pdf", 
+            facecolor='w', edgecolor='w',
+            pad_inches=0.01)
+        self.fig.savefig("../results/output.png", 
+            facecolor='w', edgecolor='w', dpi=400,
+            pad_inches=0.01)
 
 
     def title(self,title):
@@ -679,14 +370,3 @@ class BodePlot(object):
         self.fig.savefig(png_folder+name+".png", 
             facecolor='w', edgecolor='w', dpi=400,
             pad_inches=0.01)
-
-def main():
-    nyq = Log3DNyquistPlot(1e-5)
-    nyq.min_omega=.1
-    nyq.max_omega=10
-    nyq.setup_tics()
-    nyq.setup_negative_one_point()
-    nyq.show()
-
-if __name__ == '__main__':
-    main()
